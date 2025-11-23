@@ -1,61 +1,54 @@
-name: Force Unsigned Build (Final)
+name: Fix Signing Force Unsigned
 
 on: workflow_dispatch
 
 jobs:
-  build_unsigned_force:
+  build_nosign:
     runs-on: macos-latest
     steps:
-      # 1. Lấy code về
       - uses: actions/checkout@v3
-
-      # 2. Cài đặt Flutter
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
       
-      # 3. Tạo cấu trúc iOS
-      - name: Create iOS Project
+      # 1. Tạo cấu trúc iOS mặc định
+      - name: Init iOS
         run: flutter create --platforms=ios .
 
-      # 4. CƯỠNG CHẾ TẮT ĐÒI HỎI TEAM ID (Bước quan trọng nhất)
-      # Thay vì chỉ chỉnh Code Sign Style, ta ép biến CODE_SIGNING_ALLOWED = NO
-      - name: Nuke Code Signing Logic
+      # 2. PATCH (SỬA LỖI): XÓA SẠCH YÊU CẦU TEAM ID TRONG XCODE
+      # Chúng ta dùng lệnh 'sed' để xóa các dòng đòi chứng chỉ trong file project.pbxproj
+      - name: Remove Signing Requirement
         run: |
-          cd ios
-          # Xóa Team ID
-          sed -i '' 's/DEVELOPMENT_TEAM = .*/DEVELOPMENT_TEAM = "";/g' Runner.xcodeproj/project.pbxproj
-          # Chuyển về Manual
-          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' Runner.xcodeproj/project.pbxproj
-          # Xóa Identity
-          sed -i '' 's/CODE_SIGN_IDENTITY = "iPhone Developer";/CODE_SIGN_IDENTITY = "";/g' Runner.xcodeproj/project.pbxproj
-          
-          # THÊM CỜ: CẤM KÝ TÊN (CODE_SIGNING_ALLOWED = NO) vào mọi cấu hình
-          # Lệnh này sẽ tìm dòng 'BuildSettings = {' và chèn dòng cấm ký ngay sau đó
-          sed -i '' '/buildSettings = {/a\
-          CODE_SIGNING_ALLOWED = NO;\
-          CODE_SIGNING_REQUIRED = NO;\
-          CODE_SIGN_IDENTITY = "";\
-          ' Runner.xcodeproj/project.pbxproj
+          cd ios/Runner.xcodeproj
+          # Xóa dòng DevelopmentTeam
+          sed -i '' '/DevelopmentTeam/d' project.pbxproj
+          # Xóa dòng ProvisioningStyle
+          sed -i '' '/ProvisioningStyle/d' project.pbxproj
+          # Ép biến CODE_SIGN_IDENTITY thành rỗng
+          sed -i '' 's/CODE_SIGN_IDENTITY = "iPhone Developer";/CODE_SIGN_IDENTITY = "";/g' project.pbxproj
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' project.pbxproj
+          # Quan trọng: Tắt hoàn toàn Code Signing Allowed
+          sed -i '' 's/INFOPLIST_KEY_UISupportedInterfaceOrientations =/CODE_SIGNING_ALLOWED = NO; CODE_SIGNING_REQUIRED = NO; CODE_SIGN_IDENTITY = ""; INFOPLIST_KEY_UISupportedInterfaceOrientations =/g' project.pbxproj
 
       - run: flutter pub get
 
-      # 5. Build file .app (Không phải IPA)
-      - name: Build iOS App (No Codesign)
+      # 3. Build iOS App (Dạng .app Folder - ít lỗi hơn build ipa trực tiếp)
+      - name: Build .app
         run: |
-          # Build App (Chỉ tạo ra folder .app)
           flutter build ios --release --no-codesign
 
-          # Nén thủ công thành IPA để cài qua Scarlet
+      # 4. Đóng gói thủ công thành IPA
+      - name: Package as IPA
+        run: |
           mkdir Payload
-          # Copy file .app vào Payload
+          # Copy file .app đã build vào thư mục Payload
           cp -r build/ios/iphoneos/Runner.app Payload/
-          # Nén zip đặt tên đuôi là .ipa
-          zip -r Unsigned_Gomoku.ipa Payload
+          # Nén thành file .ipa
+          zip -r Stockfish_Fixed_Unsigned.ipa Payload
 
-      # 6. Tải file lên
-      - name: Upload Unsigned IPA
+      # 5. Upload kết quả
+      - name: Download IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Gomoku-iOS18-NoSign
-          path: Unsigned_Gomoku.ipa
+          name: Gomoku_iOS18_Fixed
+          path: Stockfish_Fixed_Unsigned.ipa
