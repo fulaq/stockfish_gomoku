@@ -1,4 +1,4 @@
-name: Signed IPA (Final Weapon)
+name: Fix Build iOS
 
 on: workflow_dispatch
 
@@ -6,92 +6,33 @@ jobs:
   build:
     runs-on: macos-latest
     steps:
-      # 1. Lấy Code về
       - uses: actions/checkout@v3
-
-      # 2. Thiết lập Flutter
+      
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
       
-      # 3. Tạo môi trường (Thư mục iOS)
-      - name: Create iOS Structure
-        run: flutter create --platforms=ios .
-
-      # 4. CÀI ĐẶT CHỨNG CHỈ (Quan trọng nhất)
-      - name: Install Certificate & Profile
-        env:
-          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
-          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
-          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      # --- ĐÂY LÀ LỆNH SỬA LỖI ---
+      - name: Create Missing iOS Files
         run: |
-          # Tạo các đường dẫn file tạm
-          CERT_PATH=$RUNNER_TEMP/build_certificate.p12
-          PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          # Lệnh này yêu cầu Flutter tự sinh ra thư mục ios
+          flutter create --platforms=ios .
+      # ---------------------------
 
-          # Giải mã Base64 ra file thật
-          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERT_PATH
-          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o $PP_PATH
-
-          # Tạo Keychain ảo trên máy Mac của GitHub
-          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-
-          # Import chứng chỉ vào Keychain
-          security import $CERT_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
-
-          # Cài đặt Profile
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles
-
-      # 5. THUẬT TOÁN: TỰ ĐỘNG SỬA APP ID CHO KHỚP CHỨNG CHỈ (Fix Code Signing Error)
-      - name: Sync Bundle ID from Profile
-        run: |
-          # Trích xuất App ID từ file mobileprovision
-          APP_ID_FULL=$(security cms -D -i $RUNNER_TEMP/build_pp.mobileprovision | grep -A1 application-identifier | tail -n1 | cut -d '>' -f2 | cut -d '<' -f1)
-          TEAM_ID=$(security cms -D -i $RUNNER_TEMP/build_pp.mobileprovision | grep -A1 TeamIdentifier | tail -n1 | cut -d '>' -f2 | cut -d '<' -f1)
-          
-          # Lấy Bundle ID (Bỏ phần TeamID ở đầu, ví dụ ABC.com.example -> com.example)
-          BUNDLE_ID=${APP_ID_FULL#$TEAM_ID.}
-          
-          echo "Detected TeamID: $TEAM_ID"
-          echo "Detected BundleID: $BUNDLE_ID"
-          
-          # Cưỡng ép ghi đè cấu hình Xcode
-          cd ios
-          sed -i '' "s/PRODUCT_BUNDLE_IDENTIFIER = .*/PRODUCT_BUNDLE_IDENTIFIER = $BUNDLE_ID;/g" Runner.xcodeproj/project.pbxproj
-          sed -i '' "s/DEVELOPMENT_TEAM = .*/DEVELOPMENT_TEAM = $TEAM_ID;/g" Runner.xcodeproj/project.pbxproj
-          
-          # Sửa cả file cấu hình Export (Tạo file export option chuẩn Signed)
-          cat <<EOF > ExportOptions.plist
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>method</key>
-              <string>ad-hoc</string>
-              <key>teamID</key>
-              <string>$TEAM_ID</string>
-              <key>compileBitcode</key>
-              <false/>
-          </dict>
-          </plist>
-          EOF
-
-      # 6. BUILD IPA XỊN (Có chữ ký)
       - run: flutter pub get
-      - name: Build IPA
+      
+      - name: Build IPA (Unsigned)
         run: |
-          # Chạy lệnh build release có tham chiếu file Export đã tạo ở trên
-          flutter build ipa --release --export-options-plist=ios/ExportOptions.plist
+          # Build app không cần chữ ký số
+          flutter build ios --release --no-codesign
+          
+          # Nén thủ công thành file IPA
+          mkdir Payload
+          mv build/ios/iphoneos/Runner.app Payload
+          zip -r StockfishGomoku.ipa Payload
 
-      # 7. Upload thành quả
-      - name: Upload Signed IPA
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Stockfish-Gomoku-Signed
-          path: build/ios/ipa/*.ipa
+          name: Gomoku-Fixed-IPA
+          path: StockfishGomoku.ipa
