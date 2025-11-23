@@ -1,4 +1,4 @@
-name: Fix Build iOS
+name: Final Fix Build IPA
 
 on: workflow_dispatch
 
@@ -12,27 +12,38 @@ jobs:
         with:
           channel: 'stable'
       
-      # --- ĐÂY LÀ LỆNH SỬA LỖI ---
-      - name: Create Missing iOS Files
+      # 1. Tạo thư mục iOS nếu chưa có
+      - name: Create iOS Config
         run: |
-          # Lệnh này yêu cầu Flutter tự sinh ra thư mục ios
           flutter create --platforms=ios .
-      # ---------------------------
+
+      # 2. Lệnh SỬA LỖI QUAN TRỌNG NHẤT (Hack vào file dự án Xcode)
+      # Ép tắt chế độ tự động tìm Team ID gây ra lỗi "Requires Development Team"
+      - name: Disable Code Signing Constraints
+        run: |
+          cd ios
+          # Chuyển từ Automatic sang Manual để không đòi Team ID
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' Runner.xcodeproj/project.pbxproj
+          # Xóa dòng đòi Development Team
+          sed -i '' 's/DEVELOPMENT_TEAM = "";/DEVELOPMENT_TEAM = "";/g' Runner.xcodeproj/project.pbxproj
+          # Xóa yêu cầu Code Signing Identity
+          sed -i '' 's/CODE_SIGN_IDENTITY = "iPhone Developer";/CODE_SIGN_IDENTITY = "";/g' Runner.xcodeproj/project.pbxproj
 
       - run: flutter pub get
       
+      # 3. Build App với cờ --no-codesign
       - name: Build IPA (Unsigned)
         run: |
-          # Build app không cần chữ ký số
           flutter build ios --release --no-codesign
           
-          # Nén thủ công thành file IPA
+          # Đóng gói thành file .ipa
           mkdir Payload
           mv build/ios/iphoneos/Runner.app Payload
-          zip -r StockfishGomoku.ipa Payload
+          zip -r StockfishGomoku_Final.ipa Payload
 
+      # 4. Xuất file ra
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Gomoku-Fixed-IPA
-          path: StockfishGomoku.ipa
+          name: Gomoku-Full-NoSign
+          path: StockfishGomoku_Final.ipa
