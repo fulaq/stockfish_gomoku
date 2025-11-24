@@ -1,10 +1,10 @@
-name: gomoku_god_tier
-description: Stockfish Logic Infinite Board
+name: gomokupro
+description: God Tier AI Gomoku
 publish_to: 'none'
-version: 4.0.0+1
+version: 5.0.0+1
 
 environment:
-  sdk: '>=3.3.0 <4.0.0'
+  sdk: '>=3.2.0 <4.0.0'
 
 dependencies:
   flutter:
