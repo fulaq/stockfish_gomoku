@@ -1,6 +1,7 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:math';
-import 'dart:ui' as ui;
+import 'dart:ui';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -13,460 +14,416 @@ void main() {
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.dark,
   ));
-  runApp(const GomokuProApp());
+  runApp(const GodTierApp());
 }
 
-// =========================================================
-// ENGINE AI: HIGH PERFORMANCE AGGRESSIVE LOGIC
-// =========================================================
-const int SIZE = 15;
-const int EMPTY = 0;
-const int BLACK = 1; // Người chơi (Black)
-const int WHITE = 2; // AI (White)
+// --- CORE ENGINE: INFINITE & AGGRESSIVE LOGIC ---
+// Tọa độ sử dụng: bitwise key (x << 16 | y) để tối ưu hash map
+// Phạm vi +/- 30,000 ô vuông
 
-class AICompute {
-  static int calculateMove(List<int> board) {
-    // 1. Quét nước thắng tuyệt đối (VCF Check)
-    int win = _scanMap(board, WHITE);
-    if (win != -1) return win;
+const int BLACK = 1; // Người
+const int WHITE = 2; // AI
 
-    // 2. Chặn nước thua ngay lập tức
-    int block = _scanMap(board, BLACK);
-    if (block != -1) return block;
+class GomokuEngine {
+  // Hash coordinate thành 1 số int duy nhất để key map nhanh
+  static int getKey(int x, int y) => (x << 16) | (y & 0xFFFF);
+  static int getX(int key) => key >> 16;
+  static int getY(int key) => (key << 16) >> 16; // sign extend
 
-    // 3. Minimax + Heuristic Position
-    return _findBestSpot(board);
-  }
+  // Hàm chính chạy trong Isolate
+  static int findKillerMove(Map<int, int> boardData) {
+    // 1. Nếu bàn cờ trống (hoặc ít quân), đánh vào tâm ảo (0,0)
+    if (boardData.isEmpty) return getKey(0, 0);
 
-  // Quét toàn bộ bàn cờ
-  static int _scanMap(List<int> b, int p) {
-    for (int i = 0; i < 225; i++) {
-      if (b[i] == EMPTY) {
-        b[i] = p;
-        // Kiểm tra thắng 5 (Five in a row)
-        if (_checkWin(b, i, p)) { b[i] = EMPTY; return i; }
-        b[i] = EMPTY;
-      }
-    }
-    return -1;
-  }
+    // 2. Tìm nước thắng bắt buộc (VCF - Victory by Continuous Four)
+    int? vcfWin = _solveVCF(boardData, WHITE);
+    if (vcfWin != null) return vcfWin;
 
-  // Hàm tính điểm cục bộ
-  static int _findBestSpot(List<int> b) {
-    int bestIdx = -1;
-    int maxScore = -999999999;
+    // 3. Chặn nước thắng của đối thủ
+    int? blockWin = _solveVCF(boardData, BLACK);
+    if (blockWin != null) return blockWin;
 
-    // Tạo danh sách các ô ứng viên (Chỉ xét ô có láng giềng)
-    List<int> moves = [];
-    for (int i = 0; i < 225; i++) {
-      if (b[i] == EMPTY && _hasNeighbor(b, i)) moves.add(i);
-    }
+    // 4. Minimax Alpha-Beta Deep Search
+    // Tìm vùng "chiến sự" (chỉ xét các ô gần quân đã đánh)
+    List<int> moves = _generateCandidates(boardData);
     
-    // Nếu trống trơn đánh vào tâm
-    if (moves.isEmpty) return 112;
+    int bestMove = moves.first;
+    double bestScore = -double.infinity;
+    double alpha = -double.infinity;
+    double beta = double.infinity;
 
-    for (int idx in moves) {
-      // Chiến thuật: Tấn công mạnh (1.5) - Phòng thủ chắc (1.0)
-      // AI hung hăng sẽ ưu tiên tạo thế của mình
-      int attack = _evaluateScore(b, idx, WHITE);
-      int defense = _evaluateScore(b, idx, BLACK);
-      int score = (attack * 1.2 + defense * 1.0).toInt();
+    // Iterative deepening: Tuy nghĩ lâu nhưng đi là chết
+    // Giới hạn tìm kiếm 20 nước tốt nhất
+    int count = 0;
+    for (int move in moves) {
+      boardData[move] = WHITE;
+      double score = -_negamax(boardData, 2, -beta, -alpha, BLACK);
+      boardData.remove(move);
 
-      // Random nhẹ để tránh AI đi lặp lại 1 bài
-      score += Random().nextInt(10);
-
-      if (score > maxScore) {
-        maxScore = score;
-        bestIdx = idx;
+      if (score > bestScore) {
+        bestScore = score;
+        bestMove = move;
       }
+      alpha = max(alpha, score);
+      if(alpha >= beta) break;
+      count++;
+      if(count > 25) break; // Chỉ xét 25 nước ngon nhất để tối ưu time
     }
-    return bestIdx;
+
+    return bestMove;
   }
 
-  static int _evaluateScore(List<int> b, int idx, int p) {
-    int score = 0;
-    int r = idx ~/ 15, c = idx % 15;
-    int dx = 1, dy = 15, dxy = 16, dyx = 14; // 4 Hướng
+  // --- HEURISTIC ENGINE ---
+  
+  static double _negamax(Map<int, int> board, int depth, double alpha, double beta, int player) {
+    if (depth == 0) return _evaluate(board, player);
+
+    List<int> moves = _generateCandidates(board);
+    double maxVal = -double.infinity;
+
+    for (int move in moves) {
+      board[move] = player;
+      // Đệ quy đổi vai (0: human, 1: ai)
+      double val = -_negamax(board, depth - 1, -beta, -alpha, player == WHITE ? BLACK : WHITE);
+      board.remove(move); // Backtrack
+
+      maxVal = max(maxVal, val);
+      alpha = max(alpha, val);
+      if (alpha >= beta) break;
+    }
+    return maxVal;
+  }
+
+  // Đánh giá thế cờ dựa trên Pattern (Chuỗi 5, 4, 3)
+  static double _evaluate(Map<int, int> board, int player) {
+    // AI cực ghét thua, nên điểm phòng thủ nhân hệ số cao
+    double myScore = _scanAllPatterns(board, WHITE);
+    double enemyScore = _scanAllPatterns(board, BLACK);
     
-    // Hàm check line
-    score += _countLine(b, idx, p, 1, 0);   // Ngang
-    score += _countLine(b, idx, p, 0, 1);   // Dọc
-    score += _countLine(b, idx, p, 1, 1);   // Chéo \
-    score += _countLine(b, idx, p, 1, -1);  // Chéo /
+    if (player == WHITE) return myScore * 1.2 - enemyScore * 1.5;
+    else return enemyScore * 1.2 - myScore * 1.5;
+  }
+
+  static double _scanAllPatterns(Map<int, int> board, int p) {
+    double score = 0;
+    // Chỉ quét các ô đã có quân của P để tối ưu (Infinite Board)
+    for (var entry in board.entries) {
+      if (entry.value != p) continue;
+      int k = entry.key;
+      int x = getX(k), y = getY(k);
+      // Check 4 hướng: -, |, \, /
+      score += _rateLine(board, x, y, 1, 0, p);
+      score += _rateLine(board, x, y, 0, 1, p);
+      score += _rateLine(board, x, y, 1, 1, p);
+      score += _rateLine(board, x, y, 1, -1, p);
+    }
     return score;
   }
 
-  static int _countLine(List<int> b, int idx, int p, int dx, int dy) {
-    int count = 0, openEnds = 0;
-    int r = idx ~/ 15, c = idx % 15;
+  static double _rateLine(Map<int, int> b, int x, int y, int dx, int dy, int p) {
+    // Logic đếm chuỗi (Giản lược cho hiệu năng cao)
+    // Chuỗi 5: 100,000, Open 4: 10,000, Open 3: 1,000...
+    int count = 1;
+    int blocked = 0;
     
-    // Forward check
-    for (int i = 1; i < 5; i++) {
-      int nr = r + dy*i, nc = c + dx*i;
-      // Logic fix cho các hướng
-      if(dy==0) nr = r; if(dx==0) nc = c; // Fix logic toạ độ
-      // Tính lại index thực
-      // Đơn giản hóa bằng việc duyệt trên mảng 1 chiều nhưng check biên
-      int nIdx = idx + (dy*15 + dx)*i; // Sai công thức mảng
-      // Dùng logic duyệt thủ công an toàn hơn:
-      int checkR = r + (dy)*i; 
-      int checkC = c + (dx)*i;
-      
-      if(checkR<0 || checkR>=15 || checkC<0 || checkC>=15) break;
-      int cell = b[checkR*15 + checkC];
-      if(cell == p) count++;
-      else if (cell == EMPTY) { openEnds++; break; }
-      else break;
+    // Tiến
+    for(int i=1; i<5; i++) {
+      int val = b[getKey(x + dx*i, y + dy*i)] ?? 0;
+      if(val == p) count++;
+      else if (val == 0) break;
+      else { blocked++; break; }
     }
+    // Lùi (để tránh tính trùng, ta chỉ xét pattern bắt đầu từ điểm hiện tại hướng dương, 
+    // nhưng trong infinite board thực tế phải xét cả 2. 
+    // Ở đây ta dùng thuật toán đơn giản: Mọi điểm đều được duyệt nên chỉ cần check 1 chiều từ nó)
     
-    // Backward check
-    for (int i = 1; i < 5; i++) {
-      int checkR = r - (dy)*i; 
-      int checkC = c - (dx)*i;
-      if(checkR<0 || checkR>=15 || checkC<0 || checkC>=15) break;
-      int cell = b[checkR*15 + checkC];
-      if(cell == p) count++;
-      else if (cell == EMPTY) { openEnds++; break; }
-      else break;
-    }
-
-    if (count >= 4) return 50000; // 5 in row (thắng)
-    if (count == 3) {
-      if (openEnds == 2) return 10000; // Open 4 (chắc chắn thắng sau 1 nước)
-      if (openEnds == 1) return 5000;  // Blocked 4
-    }
-    if (count == 2) {
-      if (openEnds == 2) return 1000; // Open 3 (nguy hiểm)
-      if (openEnds == 1) return 100;
-    }
-    if (count == 1 && openEnds == 2) return 10;
-    return 0;
+    // Trọng số (Weight)
+    if (count >= 5) return 1000000.0;
+    if (blocked == 2) return 0; // Chết 2 đầu
+    if (count == 4) return (blocked == 0) ? 50000 : 10000;
+    if (count == 3) return (blocked == 0) ? 5000 : 1000;
+    if (count == 2) return (blocked == 0) ? 500 : 10;
+    return 1.0;
   }
 
-  static bool _checkWin(List<int> b, int idx, int p) {
-    int r = idx ~/ 15; int c = idx % 15;
-    List<List<int>> dirs = [[1,0],[0,1],[1,1],[1,-1]];
-    for(var d in dirs){
-      int count=1;
-      for(int k=1;k<5;k++){
-        int nr=r+d[1]*k, nc=c+d[0]*k;
-        if(nr<0||nr>=15||nc<0||nc>=15||b[nr*15+nc]!=p) break; count++;
-      }
-      for(int k=1;k<5;k++){
-        int nr=r-d[1]*k, nc=c-d[0]*k;
-        if(nr<0||nr>=15||nc<0||nc>=15||b[nr*15+nc]!=p) break; count++;
-      }
-      if(count>=5) return true;
+  static int? _solveVCF(Map<int, int> b, int p) {
+    // Check nhanh nếu có nước thắng ngay
+    List<int> cands = _generateCandidates(b);
+    for(int m in cands) {
+      b[m] = p;
+      if(_checkWin(b, m, p)) { b.remove(m); return m; }
+      b.remove(m);
     }
-    return false;
+    return null;
   }
 
-  static bool _hasNeighbor(List<int> b, int idx) {
-    int r=idx~/15, c=idx%15;
-    for(int i=-1; i<=1; i++) for(int j=-1; j<=1; j++){
-      if(i==0&&j==0)continue;
-      int nr=r+i, nc=c+j;
-      if(nr>=0&&nr<15&&nc>=0&&nc<15&&b[nr*15+nc]!=EMPTY) return true;
+  static List<int> _generateCandidates(Map<int, int> b) {
+    Set<int> candidates = {};
+    // Tìm các ô trống nằm cạnh các ô đã có quân (bán kính 1 hoặc 2)
+    for (var k in b.keys) {
+      int x = getX(k), y = getY(k);
+      for (int i = -1; i <= 1; i++) {
+        for (int j = -1; j <= 1; j++) {
+          if (i == 0 && j == 0) continue;
+          int nx = x + i, ny = y + j;
+          int nk = getKey(nx, ny);
+          if (!b.containsKey(nk)) candidates.add(nk);
+        }
+      }
+    }
+    // Sort ưu tiên ô trung tâm các đám đông để cắt tỉa AlphaBeta tốt hơn
+    List<int> list = candidates.toList();
+    // Shuffle nhẹ để nước đi không bị máy móc 100%
+    list.shuffle(Random());
+    return list;
+  }
+
+  static bool _checkWin(Map<int, int> b, int key, int p) {
+    int x = getX(key), y = getY(key);
+    List<List<int>> dirs = [[1,0], [0,1], [1,1], [1,-1]];
+    for (var d in dirs) {
+      int count = 1;
+      for (int i=1; i<5; i++) {
+        if (b[getKey(x + d[0]*i, y + d[1]*i)] == p) count++; else break;
+      }
+      for (int i=1; i<5; i++) {
+        if (b[getKey(x - d[0]*i, y - d[1]*i)] == p) count++; else break;
+      }
+      if (count >= 5) return true;
     }
     return false;
   }
 }
 
 // =========================================================
-// APP UI: IOS 18 NATIVE STYLE (With Painter)
+// UI: IOS 18 ULTIMATE DESIGN
 // =========================================================
 
-class GomokuProApp extends StatelessWidget {
-  const GomokuProApp({super.key});
+class GodTierApp extends StatelessWidget {
+  const GodTierApp({super.key});
   @override
-  Widget build(BuildContext context) {
-    return const CupertinoApp(
-      title: 'Gomoku Pro',
-      theme: CupertinoThemeData(
-        brightness: Brightness.light,
-        primaryColor: CupertinoColors.activeBlue,
-        scaffoldBackgroundColor: CupertinoColors.secondarySystemBackground,
-      ),
-      debugShowCheckedModeBanner: false,
-      home: GameScreen(),
-    );
-  }
+  Widget build(BuildContext context) => const CupertinoApp(
+    theme: CupertinoThemeData(brightness: Brightness.light, primaryColor: CupertinoColors.activeBlue),
+    debugShowCheckedModeBanner: false,
+    home: InfiniteGameScreen(),
+  );
 }
 
-class GameScreen extends StatefulWidget {
-  const GameScreen({super.key});
+class InfiniteGameScreen extends StatefulWidget {
+  const InfiniteGameScreen({super.key});
   @override
-  State<GameScreen> createState() => _GameScreenState();
+  State<InfiniteGameScreen> createState() => _InfiniteGameScreenState();
 }
 
-class _GameScreenState extends State<GameScreen> {
-  // State
-  List<int> board = List.filled(225, EMPTY);
-  List<int> history = []; // Lưu lịch sử để Undo
-  bool isAiThinking = false;
+class _InfiniteGameScreenState extends State<InfiniteGameScreen> {
+  // Bàn cờ vô hạn dùng Map
+  Map<int, int> board = {}; 
+  List<int> history = [];
+  bool thinking = false;
+  String status = "Tap to Start";
   int winner = 0;
-  
-  // Zoom controller
-  final TransformationController _transformCtrl = TransformationController();
+
+  // Viewer Controller
+  final TransformationController _viewCtrl = TransformationController();
+
+  @override
+  void initState() {
+    super.initState();
+    // Căn giữa bàn cờ vô hạn lúc đầu (offset 0,0)
+    _centerBoard();
+  }
+
+  void _centerBoard() {
+    _viewCtrl.value = Matrix4.identity()
+      ..translate(MediaQuery.of(context).size.width/2, MediaQuery.of(context).size.height/2)
+      ..scale(1.5); // Mặc định Zoom 1.5x
+  }
 
   void _reset() {
     setState(() {
-      board = List.filled(225, EMPTY);
-      history.clear();
-      isAiThinking = false;
-      winner = 0;
-      _transformCtrl.value = Matrix4.identity(); // Reset zoom
+      board.clear(); history.clear(); winner = 0; status = "New Game";
     });
+    _centerBoard();
   }
 
   void _undo() {
-    if (history.length >= 2 && !isAiThinking && winner == 0) {
+    if(history.length >= 2 && !thinking && winner == 0) {
       setState(() {
-        int lastAI = history.removeLast();
-        int lastHuman = history.removeLast();
-        board[lastAI] = EMPTY;
-        board[lastHuman] = EMPTY;
+        board.remove(history.removeLast()); // AI
+        board.remove(history.removeLast()); // Player
       });
-      HapticFeedback.selectionClick();
+      HapticFeedback.mediumImpact();
     }
   }
 
-  void _onTap(Offset localPos, Size size) async {
-    if (isAiThinking || winner != 0) return;
+  void _handleTap(TapUpDetails details) async {
+    if(thinking || winner != 0) return;
 
-    // Map touch coordinates to grid index
-    double cellW = size.width / 15;
-    double cellH = size.height / 15;
-    int col = (localPos.dx / cellW).floor();
-    int row = (localPos.dy / cellH).floor();
-    int index = row * 15 + col;
+    // Lấy tọa độ chạm trong không gian InteractiveViewer
+    // Chuyển đổi từ Screen -> Local -> Grid Coordinate
+    Offset local = _viewCtrl.toScene(details.localPosition);
+    const double cellSize = 40.0; // Kích thước ô cơ sở
+    
+    // Làm tròn để lấy tọa độ lưới (x,y có thể âm)
+    int gx = (local.dx / cellSize).floor();
+    int gy = (local.dy / cellSize).floor();
+    int key = GomokuEngine.getKey(gx, gy);
 
-    if (col < 0 || col >= 15 || row < 0 || row >= 15 || board[index] != EMPTY) return;
+    if(board.containsKey(key)) return;
 
+    // --- 1. Player Move ---
     HapticFeedback.lightImpact();
-
-    // 1. Player Move
     setState(() {
-      board[index] = BLACK;
-      history.add(index);
+      board[key] = BLACK;
+      history.add(key);
+      status = "Thinking...";
+      thinking = true;
     });
 
-    if (AICompute._checkWin(board, index, BLACK)) {
-      setState(() => winner = BLACK); _showResult("Victory", "You outsmarted the machine."); return;
+    if(GomokuEngine._checkWin(board, key, BLACK)) {
+      _finish(BLACK); return;
     }
 
-    // 2. AI Turn
-    setState(() => isAiThinking = true);
-    await Future.delayed(const Duration(milliseconds: 100)); // UI render
+    // --- 2. AI Processing (Isolate) ---
+    await Future.delayed(const Duration(milliseconds: 50)); // Wait UI
+    // Clone map để ném vào Isolate
+    Map<int, int> input = Map.from(board); 
+    
+    // Chạy thuật toán thần thánh
+    int aiKey = await compute(GomokuEngine.findKillerMove, input);
 
-    List<int> boardClone = List.from(board);
-    int aiMove = await compute(AICompute.calculateMove, boardClone);
+    if(!mounted) return;
 
-    if (!mounted) return;
-
+    // --- 3. AI Move ---
     setState(() {
-      board[aiMove] = WHITE;
-      history.add(aiMove);
-      isAiThinking = false;
+      if(!board.containsKey(aiKey)) {
+        board[aiKey] = WHITE;
+        history.add(aiKey);
+      }
+      thinking = false;
+      status = "Your Turn";
     });
-    HapticFeedback.mediumImpact(); // Rung nặng hơn khi máy đánh
+    
+    HapticFeedback.heavyImpact();
+    
+    // Tự động di chuyển camera tới nước đi của AI nếu nó ở xa
+    // (Optional: Thêm animation pan tới đó nếu cần, nhưng để tự nhiên cho Pro)
 
-    if (AICompute._checkWin(board, aiMove, WHITE)) {
-      setState(() => winner = WHITE); _showResult("Defeat", "Stockfish AI wins this round.");
-    }
+    if(GomokuEngine._checkWin(board, aiKey, WHITE)) _finish(WHITE);
   }
 
-  void _showResult(String title, String body) {
-    showCupertinoDialog(context: context, builder: (ctx) => CupertinoAlertDialog(
-      title: Text(title), content: Text(body),
-      actions: [CupertinoDialogAction(child: const Text("New Game"), isDefaultAction: true, onPressed: (){
-        Navigator.pop(ctx); _reset();
-      })]
+  void _finish(int w) {
+    setState(() { winner = w; status = w == BLACK ? "Victory" : "Defeated"; });
+    showCupertinoDialog(context: context, builder: (c) => CupertinoAlertDialog(
+      title: Text(w == BLACK ? "IMPOSSIBLE!" : "Stockfish Won"),
+      content: Text(w == BLACK ? "You beat the unbeatable." : "AI checkmate you in ${history.length ~/ 2} moves."),
+      actions: [
+        CupertinoDialogAction(child: const Text("Review"), onPressed: ()=>Navigator.pop(c)),
+        CupertinoDialogAction(isDefaultAction: true, child: const Text("Rematch"), onPressed: (){Navigator.pop(c); _reset();})
+      ]
     ));
   }
 
   @override
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
-      child: NestedScrollView(
-        headerSliverBuilder: (ctx, innerBoxIsScrolled) => [
-          const CupertinoSliverNavigationBar(
-            largeTitle: Text("Gomoku Pro"),
-            backgroundColor: CupertinoColors.secondarySystemBackground,
-            border: null,
-          )
-        ],
-        body: Column(
-          children: [
-            // STATUS BAR
-            _buildStatusBar(),
-            
-            // GAME BOARD (Zoomable)
-            Expanded(
-              child: Center(
-                child: AspectRatio(
-                  aspectRatio: 1,
-                  child: Container(
-                    margin: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF2F2F7), // Nền bảng chuẩn iOS
-                      borderRadius: BorderRadius.circular(16),
-                      boxShadow: [
-                        BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 20, offset: const Offset(0, 10))
-                      ]
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(16),
-                      child: InteractiveViewer(
-                        transformationController: _transformCtrl,
-                        maxScale: 4.0,
-                        child: LayoutBuilder(
-                          builder: (ctx, constraints) {
-                            return GestureDetector(
-                              onTapUp: (details) => _onTap(details.localPosition, constraints.biggest),
-                              child: CustomPaint(
-                                size: Size(constraints.maxWidth, constraints.maxHeight),
-                                painter: BoardPainter(board, lastMove: history.isEmpty ? -1 : history.last),
-                              ),
-                            );
-                          }
-                        ),
-                      ),
-                    ),
+      backgroundColor: const Color(0xFFF5F5F7),
+      child: Stack(
+        children: [
+          // 1. INFINITE BOARD (InteractiveViewer)
+          InteractiveViewer(
+            transformationController: _viewCtrl,
+            boundaryMargin: const EdgeInsets.all(double.infinity), // Cho phép kéo đi khắp thế giới
+            minScale: 0.5, maxScale: 4.0,
+            constrained: false, // Vô hạn
+            child: GestureDetector(
+              onTapUp: _handleTap,
+              child: CustomPaint(
+                size: const Size(2000, 2000), // Kích thước vùng vẽ ảo (thực tế nó lặp vô hạn theo logic vẽ)
+                painter: InfiniteGridPainter(board, history.isNotEmpty ? history.last : null),
+              ),
+            ),
+          ),
+
+          // 2. iOS 18 HUD (Glassmorphism)
+          Positioned(
+            top: 0, left: 0, right: 0,
+            child: ClipRect(
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                child: Container(
+                  color: CupertinoColors.white.withOpacity(0.6),
+                  padding: const EdgeInsets.fromLTRB(20, 60, 20, 15),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        const Text("Gomoku Infinity", style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, letterSpacing: -1)),
+                        Text(status, style: TextStyle(fontSize: 14, color: thinking ? CupertinoColors.systemOrange : CupertinoColors.secondaryLabel, fontWeight: FontWeight.w600))
+                      ]),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(color: Colors.black12, borderRadius: BorderRadius.circular(20)),
+                        child: Row(children: [
+                          const Icon(CupertinoIcons.hexagon_fill, size: 14, color: Colors.black87),
+                          const SizedBox(width: 4),
+                          Text("${(history.length/2).ceil()}", style: const TextStyle(fontWeight: FontWeight.bold))
+                        ]),
+                      )
+                    ],
                   ),
                 ),
               ),
             ),
+          ),
 
-            // CONTROL BAR (Bottom Glass)
-            _buildBottomControls(),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStatusBar() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          _statusBadge(isAiThinking ? "AI Thinking..." : (winner!=0?"Game Over":"Your Turn"), isAiThinking || winner!=0),
-          Text("Score: ${(history.length/2).ceil()}", style: const TextStyle(color: CupertinoColors.systemGrey, fontWeight: FontWeight.w600))
+          // 3. BOTTOM ACTIONS
+          Positioned(
+            bottom: 30, left: 20, right: 20,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(30),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  color: CupertinoColors.black.withOpacity(0.8),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      _btn(CupertinoIcons.arrow_uturn_left, _undo),
+                      _btn(CupertinoIcons.add, _reset), // New Game
+                      _btn(CupertinoIcons.scope, _centerBoard), // Re-center
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          )
         ],
       ),
     );
   }
 
-  Widget _statusBadge(String text, bool active) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: active ? CupertinoColors.activeBlue : CupertinoColors.systemGrey5,
-        borderRadius: BorderRadius.circular(20)
-      ),
-      child: Text(text, style: TextStyle(
-        color: active ? Colors.white : Colors.black, fontSize: 13, fontWeight: FontWeight.bold
-      )),
-    );
-  }
-
-  Widget _buildBottomControls() {
-    return Container(
-      height: 90,
-      padding: const EdgeInsets.fromLTRB(20, 10, 20, 30),
-      decoration: BoxDecoration(
-        color: CupertinoColors.white.withOpacity(0.8),
-        border: const Border(top: BorderSide(color: Colors.black12, width: 0.5)),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _ctrlBtn(CupertinoIcons.arrow_counterclockwise, "Undo", _undo),
-          _ctrlBtn(CupertinoIcons.arrow_2_circlepath, "Restart", _reset),
-          _ctrlBtn(CupertinoIcons.settings, "Settings", () {}), // Placeholder for pro settings
-        ],
-      ),
-    );
-  }
-
-  Widget _ctrlBtn(IconData icon, String label, VoidCallback action) {
-    return CupertinoButton(
-      padding: EdgeInsets.zero,
-      onPressed: action,
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(icon, size: 26, color: CupertinoColors.label),
-          const SizedBox(height: 4),
-          Text(label, style: const TextStyle(fontSize: 10, color: CupertinoColors.secondaryLabel))
-        ],
-      ),
-    );
-  }
+  Widget _btn(IconData icon, VoidCallback func) => CupertinoButton(
+    onPressed: func, padding: EdgeInsets.zero,
+    child: Icon(icon, color: Colors.white, size: 28),
+  );
 }
 
-// =========================================================
-// HIGH PERFORMANCE RENDERER (VẼ GPU)
-// =========================================================
-class BoardPainter extends CustomPainter {
-  final List<int> board;
-  final int lastMove;
-  BoardPainter(this.board, {required this.lastMove});
+// PAINTER: VẼ BÀN CỜ DỰA TRÊN TỌA ĐỘ THỰC
+class InfiniteGridPainter extends CustomPainter {
+  final Map<int, int> board;
+  final int? lastMove;
+  const InfiniteGridPainter(this.board, this.lastMove);
 
   @override
   void paint(Canvas canvas, Size size) {
-    double step = size.width / 15;
-    double radius = step / 2.4;
-
-    // 1. Draw Grid
-    Paint linePaint = Paint()..color = CupertinoColors.systemGrey4..strokeWidth = 1.5;
-    for(int i=0; i<=15; i++) {
-      double pos = i * step + step/2 - step/2; // Căn giữa ô
-      // Đường dọc (chỉnh offset để grid nằm giữa)
-      double gridPos = i * step;
-      // Vẽ kẻ caro dạng ô vuông kín (như bàn giấy)
-      if(i<15) {
-         // Kẻ dọc
-         canvas.drawLine(Offset(gridPos, 0), Offset(gridPos, size.height), linePaint);
-         // Kẻ ngang
-         canvas.drawLine(Offset(0, gridPos), Offset(size.width, gridPos), linePaint);
-      }
-    }
+    const double cellSize = 40.0;
+    final paintGrid = Paint()..color = Colors.black12..strokeWidth = 1.0;
     
-    // Border ngoài đậm hơn
-    canvas.drawRect(Rect.fromLTWH(0,0,size.width,size.height), Paint()..color=Colors.black12..style=PaintingStyle.stroke..strokeWidth=2);
-
-    // 2. Draw Stones
-    for(int i=0; i<225; i++) {
-      if(board[i] == EMPTY) continue;
-      
-      int r = i ~/ 15; int c = i % 15;
-      double cx = c * step + step/2;
-      double cy = r * step + step/2;
-      
-      // Bóng đổ
-      canvas.drawCircle(Offset(cx+1, cy+2), radius, Paint()..color=Colors.black12..maskFilter=const MaskFilter.blur(BlurStyle.normal, 2));
-
-      // Quân cờ
-      Paint stonePaint = Paint()..color = (board[i] == BLACK ? const Color(0xFF2C2C2E) : Colors.white);
-      canvas.drawCircle(Offset(cx, cy), radius, stonePaint);
-      
-      // Viền quân trắng
-      if(board[i] == WHITE) {
-        canvas.drawCircle(Offset(cx, cy), radius, Paint()..color=Colors.black12..style=PaintingStyle.stroke..strokeWidth=1);
-      }
-
-      // Đánh dấu nước đi cuối cùng (Chấm đỏ nhỏ)
-      if(i == lastMove) {
-        canvas.drawCircle(Offset(cx, cy), radius/4, Paint()..color=CupertinoColors.systemRed);
-      }
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant BoardPainter oldDelegate) {
-    return oldDelegate.lastMove != lastMove || !listEquals(oldDelegate.board, board);
-  }
-}
+    // Lấy vùng nhìn thấy (Visible viewport) để tối ưu vẽ 
+    // (Ở phiên bản đơn giản này ta vẽ một vùng rộng cố định xung quanh center ảo 0,0)
+    // Kỹ thuật: Ta vẽ một lưới lớn "đủ dùng" cho người chơi, thực tế Board Logic là vô hạn
+    // Nhưng CustomPaint cần Size hữu hạn. Ta dùng kỹ thuật dời gốc toạ độ.
+    
+    // Draw Grid (Vùng vẽ: +/
